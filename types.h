@@ -1,7 +1,8 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
   Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
-  Copyright (C) 2008-2010 Marco Costalba, Joona Kiiski, Tord Romstad
+  Copyright (C) 2008-2015 Marco Costalba, Joona Kiiski, Tord Romstad
+  Copyright (C) 2015-2020 Marco Costalba, Joona Kiiski, Gary Linscott, Tord Romstad
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -17,201 +18,451 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#if !defined(TYPES_H_INCLUDED)
+#ifndef TYPES_H_INCLUDED
 #define TYPES_H_INCLUDED
 
+/// When compiling with provided Makefile (e.g. for Linux and OSX), configuration
+/// is done automatically. To get started type 'make help'.
+///
+/// When Makefile is not used (e.g. with Microsoft Visual Studio) some switches
+/// need to be set manually:
+///
+/// -DNDEBUG      | Disable debugging mode. Always use this for release.
+///
+/// -DNO_PREFETCH | Disable use of prefetch asm-instruction. You may need this to
+///               | run on some very old machines.
+///
+/// -DUSE_POPCNT  | Add runtime support for use of popcnt asm-instruction. Works
+///               | only in 64-bit mode and requires hardware with popcnt support.
+///
+/// -DUSE_PEXT    | Add runtime support for use of pext asm-instruction. Works
+///               | only in 64-bit mode and requires hardware with pext support.
+
+#include <cassert>
+#include <cctype>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
+#include <algorithm>
+#include <string>
+#include <vector>
 
 #if defined(_MSC_VER)
-
 // Disable some silly and noisy warning from MSVC compiler
-#pragma warning(disable: 4800) // Forcing value to bool 'true' or 'false'
 #pragma warning(disable: 4127) // Conditional expression is constant
 #pragma warning(disable: 4146) // Unary minus operator applied to unsigned type
+#pragma warning(disable: 4800) // Forcing value to bool 'true' or 'false'
+#endif
 
-// MSVC does not support <inttypes.h>
-typedef   signed __int8    int8_t;
-typedef unsigned __int8   uint8_t;
-typedef   signed __int16  int16_t;
-typedef unsigned __int16 uint16_t;
-typedef   signed __int32  int32_t;
-typedef unsigned __int32 uint32_t;
-typedef   signed __int64  int64_t;
-typedef unsigned __int64 uint64_t;
+/// Predefined macros hell:
+///
+/// __GNUC__           Compiler is gcc, Clang or Intel on Linux
+/// __INTEL_COMPILER   Compiler is Intel
+/// _MSC_VER           Compiler is MSVC or Intel on Windows
+/// _WIN32             Building on Windows (any)
+/// _WIN64             Building on Windows 64 bit
 
+#if defined(_WIN64) && defined(_MSC_VER) // No Makefile used
+#  include <intrin.h> // Microsoft header for _BitScanForward64()
+#  define IS_64BIT
+#endif
+
+#if defined(USE_POPCNT) && (defined(__INTEL_COMPILER) || defined(_MSC_VER))
+#  include <nmmintrin.h> // Intel and Microsoft header for _mm_popcnt_u64()
+#endif
+
+#if !defined(NO_PREFETCH) && (defined(__INTEL_COMPILER) || defined(_MSC_VER))
+#  include <xmmintrin.h> // Intel and Microsoft header for _mm_prefetch()
+#endif
+
+#if defined(USE_PEXT)
+#  include <immintrin.h> // Header for _pext_u64() intrinsic
+#  define pext(b, m) _pext_u64(b, m)
 #else
-
-#include <inttypes.h>
-
+#  define pext(b, m) 0
 #endif
 
-#define Min(x, y) (((x) < (y)) ? (x) : (y))
-#define Max(x, y) (((x) < (y)) ? (y) : (x))
-
-////
-//// Configuration
-////
-
-//// For Linux and OSX configuration is done automatically using Makefile.
-//// To get started type "make help".
-////
-//// For windows part of the configuration is detected automatically, but
-//// some switches need to be set manually:
-////
-//// -DNDEBUG       | Disable debugging mode. Use always.
-////
-//// -DNO_PREFETCH  | Disable use of prefetch asm-instruction. A must if you want the
-////                | executable to run on some very old machines.
-////
-//// -DUSE_POPCNT   | Add runtime support for use of popcnt asm-instruction.
-////                | Works only in 64-bit mode. For compiling requires hardware
-////                | with popcnt support. Around 4% speed-up.
-////
-//// -DOLD_LOCKS    | By default under Windows are used the fast Slim Reader/Writer (SRW)
-////                | Locks and Condition Variables: these are not supported by Windows XP
-////                | and older, to compile for those platforms you should enable OLD_LOCKS.
-
-// Automatic detection for 64-bit under Windows
-#if defined(_WIN64)
-#define IS_64BIT
-#endif
-
-// Automatic detection for use of bsfq asm-instruction under Windows
-#if defined(_WIN64)
-#define USE_BSFQ
-#endif
-
-// Intel header for _mm_popcnt_u64() intrinsic
-#if defined(USE_POPCNT) && defined(_MSC_VER) && defined(__INTEL_COMPILER)
-#include <nmmintrin.h>
-#endif
-
-// Cache line alignment specification
-#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
-#define CACHE_LINE_ALIGNMENT __declspec(align(64))
+#ifdef USE_POPCNT
+constexpr bool HasPopCnt = true;
 #else
-#define CACHE_LINE_ALIGNMENT  __attribute__ ((aligned(64)))
+constexpr bool HasPopCnt = false;
 #endif
 
-// Define a __cpuid() function for gcc compilers, for Intel and MSVC
-// is already available as an intrinsic.
-#if defined(_MSC_VER)
-#include <intrin.h>
-#elif defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-inline void __cpuid(int CPUInfo[4], int InfoType)
-{
-  int* eax = CPUInfo + 0;
-  int* ebx = CPUInfo + 1;
-  int* ecx = CPUInfo + 2;
-  int* edx = CPUInfo + 3;
-
-  *eax = InfoType;
-  *ecx = 0;
-  __asm__("cpuid" : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
-                  : "0" (*eax), "2" (*ecx));
-}
+#ifdef USE_PEXT
+constexpr bool HasPext = true;
 #else
-inline void __cpuid(int CPUInfo[4], int)
-{
-   CPUInfo[0] = CPUInfo[1] = CPUInfo[2] = CPUInfo[3] = 0;
-}
+constexpr bool HasPext = false;
 #endif
 
-// Define FORCE_INLINE macro to force inlining overriding compiler choice
-#if defined(_MSC_VER)
-#define FORCE_INLINE  __forceinline
-#elif defined(__GNUC__)
-#define FORCE_INLINE  inline __attribute__((always_inline))
+#ifdef IS_64BIT
+constexpr bool Is64Bit = true;
 #else
-#define FORCE_INLINE  inline
+constexpr bool Is64Bit = false;
 #endif
-
-/// cpu_has_popcnt() detects support for popcnt instruction at runtime
-inline bool cpu_has_popcnt() {
-
-  int CPUInfo[4] = {-1};
-  __cpuid(CPUInfo, 0x00000001);
-  return (CPUInfo[2] >> 23) & 1;
-}
-
-/// CpuHasPOPCNT is a global constant initialized at startup that
-/// is set to true if CPU on which application runs supports popcnt
-/// hardware instruction. Unless USE_POPCNT is not defined.
-#if defined(USE_POPCNT)
-const bool CpuHasPOPCNT = cpu_has_popcnt();
-#else
-const bool CpuHasPOPCNT = false;
-#endif
-
-
-/// CpuIs64Bit is a global constant initialized at compile time that
-/// is set to true if CPU on which application runs is a 64 bits.
-#if defined(IS_64BIT)
-const bool CpuIs64Bit = true;
-#else
-const bool CpuIs64Bit = false;
-#endif
-
-#include <string>
 
 typedef uint64_t Key;
 typedef uint64_t Bitboard;
 
-const int PLY_MAX = 100;
-const int PLY_MAX_PLUS_2 = PLY_MAX + 2;
+#if defined(CRAZYHOUSE) || defined(HORDE)
+constexpr int MAX_MOVES = 512;
+#else
+constexpr int MAX_MOVES = 256;
+#endif
+constexpr int MAX_PLY   = 246;
 
-enum ValueType {
-  VALUE_TYPE_NONE  = 0,
-  VALUE_TYPE_UPPER = 1,
-  VALUE_TYPE_LOWER = 2,
-  VALUE_TYPE_EXACT = VALUE_TYPE_UPPER | VALUE_TYPE_LOWER
+enum Variant {
+  //main variants
+  CHESS_VARIANT,
+#ifdef ANTI
+  ANTI_VARIANT,
+#endif
+#ifdef ATOMIC
+  ATOMIC_VARIANT,
+#endif
+#ifdef CRAZYHOUSE
+  CRAZYHOUSE_VARIANT,
+#endif
+#ifdef EXTINCTION
+  EXTINCTION_VARIANT,
+#endif
+#ifdef GRID
+  GRID_VARIANT,
+#endif
+#ifdef HORDE
+  HORDE_VARIANT,
+#endif
+#ifdef KOTH
+  KOTH_VARIANT,
+#endif
+#ifdef LOSERS
+  LOSERS_VARIANT,
+#endif
+#ifdef RACE
+  RACE_VARIANT,
+#endif
+#ifdef THREECHECK
+  THREECHECK_VARIANT,
+#endif
+#ifdef TWOKINGS
+  TWOKINGS_VARIANT,
+#endif
+  VARIANT_NB,
+  LAST_VARIANT = VARIANT_NB - 1,
+  //subvariants
+#ifdef GIVEAWAY
+  GIVEAWAY_VARIANT,
+#endif
+#ifdef SUICIDE
+  SUICIDE_VARIANT,
+#endif
+#ifdef BUGHOUSE
+  BUGHOUSE_VARIANT,
+#endif
+#ifdef DISPLACEDGRID
+  DISPLACEDGRID_VARIANT,
+#endif
+#ifdef LOOP
+  LOOP_VARIANT,
+#endif
+#ifdef PLACEMENT
+  PLACEMENT_VARIANT,
+#endif
+#ifdef SLIPPEDGRID
+  SLIPPEDGRID_VARIANT,
+#endif
+#ifdef TWOKINGSSYMMETRIC
+  TWOKINGSSYMMETRIC_VARIANT,
+#endif
+  SUBVARIANT_NB,
 };
 
-enum Value {
-  VALUE_ZERO      = 0,
-  VALUE_DRAW      = 0,
-  VALUE_KNOWN_WIN = 15000,
-  VALUE_MATE      = 30000,
-  VALUE_INFINITE  = 30001,
-  VALUE_NONE      = 30002,
-
-  VALUE_MATE_IN_PLY_MAX  =  VALUE_MATE - PLY_MAX,
-  VALUE_MATED_IN_PLY_MAX = -VALUE_MATE + PLY_MAX,
-
-  VALUE_ENSURE_INTEGER_SIZE_P = INT_MAX,
-  VALUE_ENSURE_INTEGER_SIZE_N = INT_MIN
+//static const constexpr char* variants[] doesn't play nicely with uci.h
+static std::vector<std::string> variants = {
+//main variants
+"chess",
+#ifdef ANTI
+"antichess",
+#endif
+#ifdef ATOMIC
+"atomic",
+#endif
+#ifdef CRAZYHOUSE
+"crazyhouse",
+#endif
+#ifdef EXTINCTION
+"extinction",
+#endif
+#ifdef GRID
+"grid",
+#endif
+#ifdef HORDE
+"horde",
+#endif
+#ifdef KOTH
+"kingofthehill",
+#endif
+#ifdef LOSERS
+"losers",
+#endif
+#ifdef RACE
+"racingkings",
+#endif
+#ifdef THREECHECK
+"3check",
+#endif
+#ifdef TWOKINGS
+"twokings",
+#endif
+//subvariants
+#ifdef GIVEAWAY
+"giveaway",
+#endif
+#ifdef SUICIDE
+"suicide",
+#endif
+#ifdef BUGHOUSE
+"bughouse",
+#endif
+#ifdef DISPLACEDGRID
+"displacedgrid",
+#endif
+#ifdef LOOP
+"loop",
+#endif
+#ifdef PLACEMENT
+"placement",
+#endif
+#ifdef SLIPPEDGRID
+"slippedgrid",
+#endif
+#ifdef TWOKINGSSYMMETRIC
+"twokingssymmetric",
+#endif
 };
 
-enum PieceType {
-  PIECE_TYPE_NONE = 0,
-  PAWN = 1, KNIGHT = 2, BISHOP = 3, ROOK = 4, QUEEN = 5, KING = 6
+/// A move needs 16 bits to be stored
+///
+/// bit  0- 5: destination square (from 0 to 63)
+/// bit  6-11: origin square (from 0 to 63)
+/// bit 12-13: promotion piece type - 2 (from KNIGHT-2 to QUEEN-2)
+/// bit 14-15: special move flag: promotion (1), en passant (2), castling (3)
+/// NOTE: EN-PASSANT bit is set only when a pawn can be captured
+///
+/// Special cases are MOVE_NONE and MOVE_NULL. We can sneak these in because in
+/// any normal move destination square is always different from origin square
+/// while MOVE_NONE and MOVE_NULL have the same origin and destination square.
+
+enum Move : int {
+  MOVE_NONE,
+  MOVE_NULL = 65
 };
 
-enum Piece {
-  PIECE_NONE_DARK_SQ = 0, WP = 1, WN = 2, WB = 3, WR = 4, WQ = 5, WK = 6,
-  BP = 9, BN = 10, BB = 11, BR = 12, BQ = 13, BK = 14, PIECE_NONE = 16
+enum MoveType {
+  NORMAL,
+  PROMOTION = 1 << 14,
+  ENPASSANT = 2 << 14,
+  CASTLING  = 3 << 14,
+  // special moves use promotion piece type bits as flags
+#if defined(ANTI) || defined(CRAZYHOUSE) || defined(EXTINCTION)
+  SPECIAL = ENPASSANT,
+#endif
+#ifdef CRAZYHOUSE
+  DROP = 1 << 12,
+#endif
+#if defined(ANTI) || defined(EXTINCTION)
+  KING_PROMOTION = 2 << 12, // not used as an actual move type
+#endif
 };
 
 enum Color {
-  WHITE, BLACK, COLOR_NONE
+  WHITE, BLACK, COLOR_NB = 2
 };
 
-enum Depth {
+enum CastlingRights {
+  NO_CASTLING,
+  WHITE_OO,
+  WHITE_OOO = WHITE_OO << 1,
+  BLACK_OO  = WHITE_OO << 2,
+  BLACK_OOO = WHITE_OO << 3,
 
-  ONE_PLY = 2,
+  KING_SIDE      = WHITE_OO  | BLACK_OO,
+  QUEEN_SIDE     = WHITE_OOO | BLACK_OOO,
+  WHITE_CASTLING = WHITE_OO  | WHITE_OOO,
+  BLACK_CASTLING = BLACK_OO  | BLACK_OOO,
+  ANY_CASTLING   = WHITE_CASTLING | BLACK_CASTLING,
 
-  DEPTH_ZERO         =  0 * ONE_PLY,
-// OLD DEPTH_QS_CHECKS    = -1 * ONE_PLY,
-// OLD DEPTH_QS_NO_CHECKS = -2 * ONE_PLY,
-  
-  DEPTH_QS_CHECKS    = -1 * ONE_PLY,
-  DEPTH_QS_NO_CHECKS = -2 * ONE_PLY,
-
-  DEPTH_NONE = -127 * ONE_PLY
+  CASTLING_RIGHT_NB = 16
 };
 
-enum Square {
+#ifdef GRID
+enum GridLayout {
+  NORMAL_GRID,
+#ifdef DISPLACEDGRID
+  DISPLACED_GRID,
+#endif
+#ifdef SLIPPEDGRID
+  SLIPPED_GRID,
+#endif
+  GRIDLAYOUT_NB
+};
+#endif
+
+#ifdef THREECHECK
+enum CheckCount : int {
+  CHECKS_0 = 0, CHECKS_1 = 1, CHECKS_2 = 2, CHECKS_3 = 3, CHECKS_NB = 4
+};
+#endif
+
+enum Phase {
+  PHASE_ENDGAME,
+  PHASE_MIDGAME = 128,
+  MG = 0, EG = 1, PHASE_NB = 2
+};
+
+enum ScaleFactor {
+  SCALE_FACTOR_DRAW    = 0,
+  SCALE_FACTOR_NORMAL  = 64,
+  SCALE_FACTOR_MAX     = 128,
+  SCALE_FACTOR_NONE    = 255
+};
+
+enum Bound {
+  BOUND_NONE,
+  BOUND_UPPER,
+  BOUND_LOWER,
+  BOUND_EXACT = BOUND_UPPER | BOUND_LOWER
+};
+
+enum Value : int {
+  VALUE_ZERO      = 0,
+  VALUE_DRAW      = 0,
+  VALUE_KNOWN_WIN = 10000,
+  VALUE_MATE      = 32000,
+  VALUE_INFINITE  = 32001,
+  VALUE_NONE      = 32002,
+
+  VALUE_TB_WIN_IN_MAX_PLY  =  VALUE_MATE - 2 * MAX_PLY,
+  VALUE_TB_LOSS_IN_MAX_PLY = -VALUE_MATE + 2 * MAX_PLY,
+  VALUE_MATE_IN_MAX_PLY  =  VALUE_MATE - MAX_PLY,
+  VALUE_MATED_IN_MAX_PLY = -VALUE_MATE + MAX_PLY,
+
+  PawnValueMg   = 128,   PawnValueEg   = 213,
+  KnightValueMg = 781,   KnightValueEg = 854,
+  BishopValueMg = 825,   BishopValueEg = 915,
+  RookValueMg   = 1276,  RookValueEg   = 1380,
+  QueenValueMg  = 2538,  QueenValueEg  = 2682,
+#ifdef ANTI
+  PawnValueMgAnti   = -108,  PawnValueEgAnti   = -165,
+  KnightValueMgAnti = -155,  KnightValueEgAnti = 194,
+  BishopValueMgAnti = -270,  BishopValueEgAnti = 133,
+  RookValueMgAnti   = -472,  RookValueEgAnti   = 56,
+  QueenValueMgAnti  = -114,  QueenValueEgAnti  = -218,
+  KingValueMgAnti   = -23,   KingValueEgAnti   = 173,
+#endif
+#ifdef ATOMIC
+  PawnValueMgAtomic   = 244,   PawnValueEgAtomic   = 367,
+  KnightValueMgAtomic = 437,   KnightValueEgAtomic = 652,
+  BishopValueMgAtomic = 552,   BishopValueEgAtomic = 716,
+  RookValueMgAtomic   = 787,   RookValueEgAtomic   = 1074,
+  QueenValueMgAtomic  = 1447,  QueenValueEgAtomic  = 1892,
+#endif
+#ifdef CRAZYHOUSE
+  PawnValueMgHouse   = 149,   PawnValueEgHouse   = 206,
+  KnightValueMgHouse = 447,   KnightValueEgHouse = 527,
+  BishopValueMgHouse = 450,   BishopValueEgHouse = 521,
+  RookValueMgHouse   = 619,   RookValueEgHouse   = 669,
+  QueenValueMgHouse  = 878,   QueenValueEgHouse  = 965,
+#endif
+#ifdef EXTINCTION
+  PawnValueMgExtinction   = 209,   PawnValueEgExtinction   = 208,
+  KnightValueMgExtinction = 823,   KnightValueEgExtinction = 1091,
+  BishopValueMgExtinction = 1097,  BishopValueEgExtinction = 1055,
+  RookValueMgExtinction   = 726,   RookValueEgExtinction   = 950,
+  QueenValueMgExtinction  = 2111,  QueenValueEgExtinction  = 2014,
+  KingValueMgExtinction   = 919,   KingValueEgExtinction   = 1093,
+#endif
+#ifdef GRID
+  PawnValueMgGrid   = 38,    PawnValueEgGrid   = 55,
+  KnightValueMgGrid = 993,   KnightValueEgGrid = 903,
+  BishopValueMgGrid = 685,   BishopValueEgGrid = 750,
+  RookValueMgGrid   = 1018,  RookValueEgGrid   = 1055,
+  QueenValueMgGrid  = 2556,  QueenValueEgGrid  = 2364,
+#endif
+#ifdef HORDE
+  PawnValueMgHorde   = 321,   PawnValueEgHorde   = 326,
+  KnightValueMgHorde = 888,   KnightValueEgHorde = 991,
+  BishopValueMgHorde = 743,   BishopValueEgHorde = 1114,
+  RookValueMgHorde   = 948,   RookValueEgHorde   = 1230,
+  QueenValueMgHorde  = 2736,  QueenValueEgHorde  = 2554,
+  KingValueMgHorde   = 2073,  KingValueEgHorde   = 921,
+#endif
+#ifdef KOTH
+  PawnValueMgHill   = 136,   PawnValueEgHill   = 225,
+  KnightValueMgHill = 657,   KnightValueEgHill = 781,
+  BishopValueMgHill = 763,   BishopValueEgHill = 849,
+  RookValueMgHill   = 1010,  RookValueEgHill   = 1175,
+  QueenValueMgHill  = 2104,  QueenValueEgHill  = 2402,
+#endif
+#ifdef LOSERS
+  PawnValueMgLosers   = -40,   PawnValueEgLosers   = -25,
+  KnightValueMgLosers = -23,   KnightValueEgLosers = 369,
+  BishopValueMgLosers = -206,  BishopValueEgLosers = 245,
+  RookValueMgLosers   = -415,  RookValueEgLosers   = 80,
+  QueenValueMgLosers  = -111,  QueenValueEgLosers  = -209,
+#endif
+#ifdef RACE
+  KnightValueMgRace = 777,   KnightValueEgRace = 881,
+  BishopValueMgRace = 1025,  BishopValueEgRace = 1070,
+  RookValueMgRace   = 1272,  RookValueEgRace   = 1847,
+  QueenValueMgRace  = 1674,  QueenValueEgRace  = 2280,
+#endif
+#ifdef THREECHECK
+  PawnValueMgThreeCheck   = 119,   PawnValueEgThreeCheck   = 205,
+  KnightValueMgThreeCheck = 645,   KnightValueEgThreeCheck = 770,
+  BishopValueMgThreeCheck = 693,   BishopValueEgThreeCheck = 754,
+  RookValueMgThreeCheck   = 1027,  RookValueEgThreeCheck   = 1418,
+  QueenValueMgThreeCheck  = 1947,  QueenValueEgThreeCheck  = 2323,
+#endif
+#ifdef TWOKINGS
+  PawnValueMgTwoKings   = 206,   PawnValueEgTwoKings   = 265,
+  KnightValueMgTwoKings = 887,   KnightValueEgTwoKings = 871,
+  BishopValueMgTwoKings = 940,   BishopValueEgTwoKings = 898,
+  RookValueMgTwoKings   = 1360,  RookValueEgTwoKings   = 1415,
+  QueenValueMgTwoKings  = 2455,  QueenValueEgTwoKings  = 2846,
+  KingValueMgTwoKings   = 554,   KingValueEgTwoKings   = 806,
+#endif
+
+  MidgameLimit  = 15258, EndgameLimit  = 3915
+};
+
+enum PieceType {
+  NO_PIECE_TYPE, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING,
+  ALL_PIECES = 0,
+  PIECE_TYPE_NB = 8
+};
+
+enum Piece {
+  NO_PIECE,
+  W_PAWN = 1, W_KNIGHT, W_BISHOP, W_ROOK, W_QUEEN, W_KING,
+  B_PAWN = 9, B_KNIGHT, B_BISHOP, B_ROOK, B_QUEEN, B_KING,
+  PIECE_NB = 16
+};
+
+extern Value PieceValue[VARIANT_NB][PHASE_NB][PIECE_NB];
+
+typedef int Depth;
+
+enum : int {
+
+  DEPTH_QS_CHECKS     =  0,
+  DEPTH_QS_NO_CHECKS  = -1,
+  DEPTH_QS_RECAPTURES = -5,
+
+  DEPTH_NONE   = -6,
+  DEPTH_OFFSET = DEPTH_NONE,
+};
+
+enum Square : int {
   SQ_A1, SQ_B1, SQ_C1, SQ_D1, SQ_E1, SQ_F1, SQ_G1, SQ_H1,
   SQ_A2, SQ_B2, SQ_C2, SQ_D2, SQ_E2, SQ_F2, SQ_G2, SQ_H2,
   SQ_A3, SQ_B3, SQ_C3, SQ_D3, SQ_E3, SQ_F3, SQ_G3, SQ_H3,
@@ -222,283 +473,328 @@ enum Square {
   SQ_A8, SQ_B8, SQ_C8, SQ_D8, SQ_E8, SQ_F8, SQ_G8, SQ_H8,
   SQ_NONE,
 
-  DELTA_N =  8,
-  DELTA_E =  1,
-  DELTA_S = -8,
-  DELTA_W = -1,
-
-  DELTA_NN = DELTA_N + DELTA_N,
-  DELTA_NE = DELTA_N + DELTA_E,
-  DELTA_SE = DELTA_S + DELTA_E,
-  DELTA_SS = DELTA_S + DELTA_S,
-  DELTA_SW = DELTA_S + DELTA_W,
-  DELTA_NW = DELTA_N + DELTA_W
+  SQUARE_NB = 64
 };
 
-enum File {
-  FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_NONE = -1
+enum Direction : int {
+  NORTH =  8,
+  EAST  =  1,
+  SOUTH = -NORTH,
+  WEST  = -EAST,
+
+  NORTH_EAST = NORTH + EAST,
+  SOUTH_EAST = SOUTH + EAST,
+  SOUTH_WEST = SOUTH + WEST,
+  NORTH_WEST = NORTH + WEST
 };
 
-enum Rank {
-  RANK_1, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7, RANK_8, RANK_NONE = -1
+enum File : int {
+  FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_NB
 };
 
-enum SquareColor {
-  DARK, LIGHT
-};
-
-enum ScaleFactor {
-  SCALE_FACTOR_ZERO   = 0,
-  SCALE_FACTOR_NORMAL = 64,
-  SCALE_FACTOR_MAX    = 128,
-  SCALE_FACTOR_NONE   = 255
+enum Rank : int {
+  RANK_1, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7, RANK_8, RANK_NB
 };
 
 
-/// Score enum keeps a midgame and an endgame value in a single
-/// integer (enum), first LSB 16 bits are used to store endgame
-/// value, while upper bits are used for midgame value. Compiler
-/// is free to choose the enum type as long as can keep its data,
-/// so ensure Score to be an integer type.
-enum Score {
-    SCORE_ZERO = 0,
-    SCORE_ENSURE_INTEGER_SIZE_P = INT_MAX,
-    SCORE_ENSURE_INTEGER_SIZE_N = INT_MIN
-};
+/// Score enum stores a middlegame and an endgame value in a single integer (enum).
+/// The least significant 16 bits are used to store the middlegame value and the
+/// upper 16 bits are used to store the endgame value. We have to take care to
+/// avoid left-shifting a signed int to avoid undefined behavior.
+enum Score : int { SCORE_ZERO };
 
-#define ENABLE_OPERATORS_ON(T) \
-inline T operator+ (const T d1, const T d2) { return T(int(d1) + int(d2)); } \
-inline T operator- (const T d1, const T d2) { return T(int(d1) - int(d2)); } \
-inline T operator* (int i, const T d) {  return T(i * int(d)); } \
-inline T operator* (const T d, int i) {  return T(int(d) * i); } \
-inline T operator/ (const T d, int i) { return T(int(d) / i); } \
-inline T operator- (const T d) { return T(-int(d)); } \
-inline T operator++ (T& d, int) {d = T(int(d) + 1); return d; } \
-inline T operator-- (T& d, int) { d = T(int(d) - 1); return d; } \
-inline T operator++ (T& d) {d = T(int(d) + 1); return d; } \
-inline T operator-- (T& d) { d = T(int(d) - 1); return d; } \
-inline void operator+= (T& d1, const T d2) { d1 = d1 + d2; } \
-inline void operator-= (T& d1, const T d2) { d1 = d1 - d2; } \
-inline void operator*= (T& d, int i) { d = T(int(d) * i); } \
-inline void operator/= (T& d, int i) { d = T(int(d) / i); }
+constexpr Score make_score(int mg, int eg) {
+  return Score((int)((unsigned int)eg << 16) + mg);
+}
 
-ENABLE_OPERATORS_ON(Value)
-ENABLE_OPERATORS_ON(PieceType)
-ENABLE_OPERATORS_ON(Piece)
-ENABLE_OPERATORS_ON(Color)
-ENABLE_OPERATORS_ON(Depth)
-ENABLE_OPERATORS_ON(Square)
-ENABLE_OPERATORS_ON(File)
-ENABLE_OPERATORS_ON(Rank)
+/// Extracting the signed lower and upper 16 bits is not so trivial because
+/// according to the standard a simple cast to short is implementation defined
+/// and so is a right shift of a signed integer.
+inline Value eg_value(Score s) {
+  union { uint16_t u; int16_t s; } eg = { uint16_t(unsigned(s + 0x8000) >> 16) };
+  return Value(eg.s);
+}
 
-#undef ENABLE_OPERATORS_ON
+inline Value mg_value(Score s) {
+  union { uint16_t u; int16_t s; } mg = { uint16_t(unsigned(s)) };
+  return Value(mg.s);
+}
 
-// Extra operators for adding integers to a Value
-inline Value operator+ (Value v, int i) { return Value(int(v) + i); }
-inline Value operator- (Value v, int i) { return Value(int(v) - i); }
+#define ENABLE_BASE_OPERATORS_ON(T)                                \
+constexpr T operator+(T d1, T d2) { return T(int(d1) + int(d2)); } \
+constexpr T operator-(T d1, T d2) { return T(int(d1) - int(d2)); } \
+constexpr T operator-(T d) { return T(-int(d)); }                  \
+inline T& operator+=(T& d1, T d2) { return d1 = d1 + d2; }         \
+inline T& operator-=(T& d1, T d2) { return d1 = d1 - d2; }
 
-// Extracting the _signed_ lower and upper 16 bits it not so trivial
-// because according to the standard a simple cast to short is
-// implementation defined and so is a right shift of a signed integer.
-inline Value mg_value(Score s) { return Value(((int(s) + 32768) & ~0xffff) / 0x10000); }
+#define ENABLE_INCR_OPERATORS_ON(T)                                \
+inline T& operator++(T& d) { return d = T(int(d) + 1); }           \
+inline T& operator--(T& d) { return d = T(int(d) - 1); }
 
-// Unfortunatly on Intel 64 bit we have a small speed regression, so use a faster code in
-// this case, although not 100% standard compliant it seems to work for Intel and MSVC.
-#if defined(IS_64BIT) && (!defined(__GNUC__) || defined(__INTEL_COMPILER))
-inline Value eg_value(Score s) { return Value(int16_t(s & 0xffff)); }
-#else
-inline Value eg_value(Score s) { return Value((int)(unsigned(s) & 0x7fffu) - (int)(unsigned(s) & 0x8000u)); }
+#define ENABLE_FULL_OPERATORS_ON(T)                                \
+ENABLE_BASE_OPERATORS_ON(T)                                        \
+constexpr T operator*(int i, T d) { return T(i * int(d)); }        \
+constexpr T operator*(T d, int i) { return T(int(d) * i); }        \
+constexpr T operator/(T d, int i) { return T(int(d) / i); }        \
+constexpr int operator/(T d1, T d2) { return int(d1) / int(d2); }  \
+inline T& operator*=(T& d, int i) { return d = T(int(d) * i); }    \
+inline T& operator/=(T& d, int i) { return d = T(int(d) / i); }
+
+ENABLE_FULL_OPERATORS_ON(Value)
+ENABLE_FULL_OPERATORS_ON(Direction)
+
+ENABLE_INCR_OPERATORS_ON(Variant)
+#ifdef THREECHECK
+ENABLE_INCR_OPERATORS_ON(CheckCount)
 #endif
+ENABLE_INCR_OPERATORS_ON(PieceType)
+ENABLE_INCR_OPERATORS_ON(Piece)
+ENABLE_INCR_OPERATORS_ON(Square)
+ENABLE_INCR_OPERATORS_ON(File)
+ENABLE_INCR_OPERATORS_ON(Rank)
 
-inline Score make_score(int mg, int eg) { return Score((mg << 16) + eg); }
+ENABLE_BASE_OPERATORS_ON(Score)
 
-// Division must be handled separately for each term
-inline Score operator/(Score s, int i) { return make_score(mg_value(s) / i, eg_value(s) / i); }
+#undef ENABLE_FULL_OPERATORS_ON
+#undef ENABLE_INCR_OPERATORS_ON
+#undef ENABLE_BASE_OPERATORS_ON
 
-// Only declared but not defined. We don't want to multiply two scores due to
-// a very high risk of overflow. So user should explicitly convert to integer.
-inline Score operator*(Score s1, Score s2);
+/// Additional operators to add integers to a Value
+constexpr Value operator+(Value v, int i) { return Value(int(v) + i); }
+constexpr Value operator-(Value v, int i) { return Value(int(v) - i); }
+inline Value& operator+=(Value& v, int i) { return v = v + i; }
+inline Value& operator-=(Value& v, int i) { return v = v - i; }
 
-// Remaining Score operators are standard
-inline Score operator+ (const Score d1, const Score d2) { return Score(int(d1) + int(d2)); }
-inline Score operator- (const Score d1, const Score d2) { return Score(int(d1) - int(d2)); }
-inline Score operator* (int i, const Score d) {  return Score(i * int(d)); }
-inline Score operator* (const Score d, int i) {  return Score(int(d) * i); }
-inline Score operator- (const Score d) { return Score(-int(d)); }
-inline void operator+= (Score& d1, const Score d2) { d1 = d1 + d2; }
-inline void operator-= (Score& d1, const Score d2) { d1 = d1 - d2; }
-inline void operator*= (Score& d, int i) { d = Score(int(d) * i); }
-inline void operator/= (Score& d, int i) { d = Score(int(d) / i); }
+/// Additional operators to add a Direction to a Square
+constexpr Square operator+(Square s, Direction d) { return Square(int(s) + int(d)); }
+constexpr Square operator-(Square s, Direction d) { return Square(int(s) - int(d)); }
+inline Square& operator+=(Square& s, Direction d) { return s = s + d; }
+inline Square& operator-=(Square& s, Direction d) { return s = s - d; }
 
-// OLD PIECE VALUES
-//const Value PawnValueMidgame   = Value(0x0C6);	// 198
-//const Value PawnValueEndgame   = Value(0x102);	// 258
-//const Value KnightValueMidgame = Value(0x331);	// 817
-//const Value KnightValueEndgame = Value(0x34E);	// 846
-//const Value BishopValueMidgame = Value(0x344);	// 836
-//const Value BishopValueEndgame = Value(0x359);	// 857
-//const Value RookValueMidgame   = Value(0x4F6);	// 1270
-//const Value RookValueEndgame   = Value(0x4FE);	// 1278
-//const Value QueenValueMidgame  = Value(0x9D9);	// 2521
-//const Value QueenValueEndgame  = Value(0x9FE);	// 2558
+/// Only declared but not defined. We don't want to multiply two scores due to
+/// a very high risk of overflow. So user should explicitly convert to integer.
+Score operator*(Score, Score) = delete;
 
-// NEW PIECE VALUES
-const float VALUE_SCALE = 0.75f;
-//const Value PawnValueMidgame   = Value(int(200  * VALUE_SCALE));
-//const Value PawnValueEndgame   = Value(int(300  * VALUE_SCALE));
-//const Value KnightValueMidgame = Value(int(300  * VALUE_SCALE));
-//const Value KnightValueEndgame = Value(int(350  * VALUE_SCALE));
-//const Value BishopValueMidgame = Value(int(300  * VALUE_SCALE));
-//const Value BishopValueEndgame = Value(int(320  * VALUE_SCALE));
-//const Value RookValueMidgame   = Value(int(600  * VALUE_SCALE));
-//const Value RookValueEndgame   = Value(int(800  * VALUE_SCALE));
-//const Value QueenValueMidgame  = Value(int(1300 * VALUE_SCALE));
-//const Value QueenValueEndgame  = Value(int(1600 * VALUE_SCALE));
+/// Division of a Score must be handled separately for each term
+inline Score operator/(Score s, int i) {
+  return make_score(mg_value(s) / i, eg_value(s) / i);
+}
 
-//const Value MinorPiecePawnValueDiff = KnightValueMidgame - PawnValueMidgame;
+/// Multiplication of a Score by an integer. We check for overflow in debug mode.
+inline Score operator*(Score s, int i) {
 
-extern Value PawnValueMidgame;
-extern Value PawnValueEndgame;
-extern Value KnightValueMidgame;
-extern Value KnightValueEndgame;
-extern Value BishopValueMidgame;
-extern Value BishopValueEndgame;
-extern Value RookValueMidgame;
-extern Value RookValueEndgame;
-extern Value QueenValueMidgame;
-extern Value QueenValueEndgame;
+  Score result = Score(int(s) * i);
 
+  assert(eg_value(result) == (i * eg_value(s)));
+  assert(mg_value(result) == (i * mg_value(s)));
+  assert((i == 0) || (result / i) == s);
 
+  return result;
+}
 
-inline Value value_mate_in(int ply) {
+/// Multiplication of a Score by a boolean
+inline Score operator*(Score s, bool b) {
+  return Score(int(s) * int(b));
+}
+
+constexpr Color operator~(Color c) {
+  return Color(c ^ BLACK); // Toggle color
+}
+
+constexpr Square operator~(Square s) {
+  return Square(s ^ SQ_A8); // Vertical flip SQ_A1 -> SQ_A8
+}
+
+constexpr Piece operator~(Piece pc) {
+  return Piece(pc ^ 8); // Swap color of piece B_KNIGHT -> W_KNIGHT
+}
+
+inline File map_to_queenside(File f) {
+  return std::min(f, File(FILE_H - f)); // Map files ABCDEFGH to files ABCDDCBA
+}
+
+constexpr CastlingRights operator&(Color c, CastlingRights cr) {
+  return CastlingRights((c == WHITE ? WHITE_CASTLING : BLACK_CASTLING) & cr);
+}
+
+constexpr Value mate_in(int ply) {
   return VALUE_MATE - ply;
 }
 
-inline Value value_mated_in(int ply) {
+constexpr Value mated_in(int ply) {
   return -VALUE_MATE + ply;
 }
 
-inline Piece make_piece(Color c, PieceType pt) {
-  return Piece((int(c) << 3) | int(pt));
+constexpr Square make_square(File f, Rank r) {
+  return Square((r << 3) + f);
 }
 
-inline PieceType type_of_piece(Piece p)  {
-  return PieceType(int(p) & 7);
+constexpr Piece make_piece(Color c, PieceType pt) {
+  return Piece((c << 3) + pt);
 }
 
-inline Color color_of_piece(Piece p) {
-  return Color(int(p) >> 3);
+constexpr PieceType type_of(Piece pc) {
+  return PieceType(pc & 7);
 }
 
-inline Color opposite_color(Color c) {
-  return Color(int(c) ^ 1);
+inline Color color_of(Piece pc) {
+  assert(pc != NO_PIECE);
+  return Color(pc >> 3);
 }
 
-inline bool color_is_ok(Color c) {
-  return c == WHITE || c == BLACK;
-}
-
-inline bool piece_type_is_ok(PieceType pt) {
-  return pt >= PAWN && pt <= KING;
-}
-
-inline bool piece_is_ok(Piece p) {
-  return piece_type_is_ok(type_of_piece(p)) && color_is_ok(color_of_piece(p));
-}
-
-inline char piece_type_to_char(PieceType pt) {
-  static const char ch[] = " PNBRQK";
-  return ch[pt];
-}
-
-inline Square make_square(File f, Rank r) {
-  return Square((int(r) << 3) | int(f));
-}
-
-inline File square_file(Square s) {
-  return File(int(s) & 7);
-}
-
-inline Rank square_rank(Square s) {
-  return Rank(int(s) >> 3);
-}
-
-inline Square flip_square(Square s) {
-  return Square(int(s) ^ 56);
-}
-
-inline Square flop_square(Square s) {
-  return Square(int(s) ^ 7);
-}
-
-inline Square relative_square(Color c, Square s) {
-  return Square(int(s) ^ (int(c) * 56));
-}
-
-inline Rank relative_rank(Color c, Rank r) {
-  return Rank(int(r) ^ (int(c) * 7));
-}
-
-inline Rank relative_rank(Color c, Square s) {
-  return relative_rank(c, square_rank(s));
-}
-
-inline SquareColor square_color(Square s) {
-  return SquareColor(int(square_rank(s) + s) & 1);
-}
-
-inline bool opposite_color_squares(Square s1, Square s2) {
-  int s = int(s1) ^ int(s2);
-  return ((s >> 3) ^ s) & 1;
-}
-
-inline int file_distance(Square s1, Square s2) {
-  return abs(square_file(s1) - square_file(s2));
-}
-
-inline int rank_distance(Square s1, Square s2) {
-  return abs(square_rank(s1) - square_rank(s2));
-}
-
-inline int square_distance(Square s1, Square s2) {
-  return Max(file_distance(s1, s2), rank_distance(s1, s2));
-}
-
-inline File file_from_char(char c) {
-  return File(c - 'a') + FILE_A;
-}
-
-inline char file_to_char(File f) {
-  return char(f - FILE_A + int('a'));
-}
-
-inline Rank rank_from_char(char c) {
-  return Rank(c - '1') + RANK_1;
-}
-
-inline char rank_to_char(Rank r) {
-  return char(r - RANK_1 + int('1'));
-}
-
-inline const std::string square_to_string(Square s) {
-  char ch[] = { file_to_char(square_file(s)), rank_to_char(square_rank(s)), 0 };
-  return std::string(ch);
-}
-
-inline bool file_is_ok(File f) {
-  return f >= FILE_A && f <= FILE_H;
-}
-
-inline bool rank_is_ok(Rank r) {
-  return r >= RANK_1 && r <= RANK_8;
-}
-
-inline bool square_is_ok(Square s) {
+constexpr bool is_ok(Square s) {
   return s >= SQ_A1 && s <= SQ_H8;
 }
 
-inline Square pawn_push(Color c) {
-  return c == WHITE ? DELTA_N : DELTA_S;
+constexpr File file_of(Square s) {
+  return File(s & 7);
 }
 
-#endif // !defined(TYPES_H_INCLUDED)
+constexpr Rank rank_of(Square s) {
+  return Rank(s >> 3);
+}
+
+constexpr Square relative_square(Color c, Square s) {
+  return Square(s ^ (c * 56));
+}
+
+constexpr Rank relative_rank(Color c, Rank r) {
+  return Rank(r ^ (c * 7));
+}
+
+constexpr Rank relative_rank(Color c, Square s) {
+  return relative_rank(c, rank_of(s));
+}
+
+constexpr Direction pawn_push(Color c) {
+  return c == WHITE ? NORTH : SOUTH;
+}
+
+#ifdef RACE
+constexpr Square horizontal_flip(Square s) {
+  return Square(s ^ (FILE_NB - 1)); // Horizontal flip SQ_A1 -> SQ_H1
+}
+#endif
+
+inline MoveType type_of(Move m);
+
+inline Square from_sq(Move m) {
+#ifdef CRAZYHOUSE
+  if (type_of(m) == DROP)
+      return SQ_NONE;
+#endif
+  return Square((m >> 6) & 0x3F);
+}
+
+constexpr Square to_sq(Move m) {
+  return Square(m & 0x3F);
+}
+
+inline int from_to(Move m) {
+#ifdef CRAZYHOUSE
+  if (type_of(m) == DROP)
+      return (m & 0x3F) + 0x1000;
+#endif
+ return m & 0xFFF;
+}
+
+inline MoveType type_of(Move m) {
+#if defined(ANTI) || defined(CRAZYHOUSE) || defined(EXTINCTION)
+  if ((m & (3 << 14)) == SPECIAL && (m & (3 << 12)))
+  {
+#ifdef CRAZYHOUSE
+      if ((m & (3 << 12)) == DROP)
+          return DROP;
+#endif
+#if defined(ANTI) || defined(EXTINCTION)
+      if ((m & (3 << 12)) == KING_PROMOTION)
+          return PROMOTION;
+#endif
+  }
+#endif
+  return MoveType(m & (3 << 14));
+}
+
+inline PieceType promotion_type(Move m) {
+#if defined(ANTI) || defined(EXTINCTION)
+  if ((m & (3 << 14)) == SPECIAL && (m & (3 << 12)) == KING_PROMOTION)
+      return KING;
+#endif
+  return PieceType(((m >> 12) & 3) + KNIGHT);
+}
+
+constexpr Move make_move(Square from, Square to) {
+  return Move((from << 6) + to);
+}
+
+inline Move reverse_move(Move m) {
+  return make_move(to_sq(m), from_sq(m));
+}
+
+template<MoveType T>
+inline Move make(Square from, Square to, PieceType pt = KNIGHT) {
+#if defined(ANTI) || defined(EXTINCTION)
+  if (pt == KING)
+      return Move(SPECIAL + KING_PROMOTION + (from << 6) + to);
+#endif
+  return Move(T + ((pt - KNIGHT) << 12) + (from << 6) + to);
+}
+
+#ifdef CRAZYHOUSE
+constexpr Move make_drop(Square to, Piece pc) {
+  return Move(SPECIAL + DROP + (pc << 6) + to);
+}
+
+constexpr Piece dropped_piece(Move m) {
+  return Piece((m >> 6) & 0x0F);
+}
+#endif
+
+inline bool is_ok(Move m) {
+  return from_sq(m) != to_sq(m); // Catch MOVE_NULL and MOVE_NONE
+}
+
+inline Variant main_variant(Variant v) {
+  if (v < VARIANT_NB)
+      return v;
+  switch(v)
+  {
+#ifdef GIVEAWAY
+  case GIVEAWAY_VARIANT:
+      return ANTI_VARIANT;
+#endif
+#ifdef SUICIDE
+  case SUICIDE_VARIANT:
+      return ANTI_VARIANT;
+#endif
+#ifdef BUGHOUSE
+  case BUGHOUSE_VARIANT:
+      return CRAZYHOUSE_VARIANT;
+#endif
+#ifdef DISPLACEDGRID
+  case DISPLACEDGRID_VARIANT:
+      return GRID_VARIANT;
+#endif
+#ifdef LOOP
+  case LOOP_VARIANT:
+      return CRAZYHOUSE_VARIANT;
+#endif
+#ifdef PLACEMENT
+  case PLACEMENT_VARIANT:
+      return CRAZYHOUSE_VARIANT;
+#endif
+#ifdef SLIPPEDGRID
+  case SLIPPEDGRID_VARIANT:
+      return GRID_VARIANT;
+#endif
+#ifdef TWOKINGSSYMMETRIC
+  case TWOKINGSSYMMETRIC_VARIANT:
+      return TWOKINGS_VARIANT;
+#endif
+  default:
+      assert(false);
+      return CHESS_VARIANT; // Silence a warning
+  }
+}
+
+#endif // #ifndef TYPES_H_INCLUDED
